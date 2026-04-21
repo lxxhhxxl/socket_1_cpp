@@ -4,7 +4,7 @@
 #include <string>
 
 class TcpClient {
-    public:
+public:
     explicit TcpClient(const std::string& ip = "127.0.0.1", int port = 8080);
     ~TcpClient();
 
@@ -12,8 +12,8 @@ class TcpClient {
     void disconnect();
     bool sendMessage(const std::string& msg);
     std::string receiveMessage();
-    
-    private:
+
+private:
     std::string server_ip_;
     int port_;
     int sockfd_;

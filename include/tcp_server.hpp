@@ -11,7 +11,7 @@ class TcpServer{
     ~TcpServer();
 
     bool start();
-    void end();
+    void stop();
     void run(); //阻塞运行
 
     private:
@@ -20,8 +20,8 @@ class TcpServer{
     int server_fd_;
     bool running_;
 
-    bool initSocekt();
+    bool initSocket();
     void handleClient(int client_fd);
-}
+};
 
 #endif
