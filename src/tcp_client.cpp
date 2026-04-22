@@ -5,6 +5,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <fstream>
 
 TcpClient::TcpClient(const std::string& ip, int port)
     : server_ip_(ip), port_(port), sockfd_(-1) {}
@@ -44,19 +45,140 @@ void TcpClient::disconnect() {
     }
 }
 
+// ========== 字符串模式 ==========
+
 bool TcpClient::sendMessage(const std::string& msg) {
     if (sockfd_ < 0) return false;
-    ssize_t n = send(sockfd_, msg.c_str(), msg.length(), 0);
-    return n == static_cast<ssize_t>(msg.length());
+    
+    // 发送4字节长度头（网络字节序）+ 字符串数据
+    uint32_t len = htonl(msg.length());
+    if (!sendAll(reinterpret_cast<uint8_t*>(&len), sizeof(len))) return false;
+    if (!sendAll(reinterpret_cast<const uint8_t*>(msg.c_str()), msg.length())) return false;
+    
+    return true;
 }
 
 std::string TcpClient::receiveMessage() {
     if (sockfd_ < 0) return "";
     
-    char buffer[1024];
-    ssize_t n = recv(sockfd_, buffer, sizeof(buffer) - 1, 0);
-    if (n <= 0) return "";
+    // 接收4字节长度头
+    uint32_t len_net;
+    if (!recvAll(reinterpret_cast<uint8_t*>(&len_net), sizeof(len_net))) return "";
+    uint32_t len = ntohl(len_net);
     
-    buffer[n] = '\0';
-    return std::string(buffer);
+    if (len == 0 || len > 10 * 1024 * 1024) return ""; // 防止异常
+    
+    // 接收字符串数据
+    std::string result(len, '\0');
+    if (!recvAll(reinterpret_cast<uint8_t*>(&result[0]), len)) return "";
+    
+    return result;
+}
+
+// ========== 二进制文件模式 ==========
+
+bool TcpClient::sendFile(const std::string& filepath) {
+    if (sockfd_ < 0) return false;
+    
+    // 打开文件
+    std::ifstream file(filepath, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) {
+        std::cerr << "无法打开文件: " << filepath << std::endl;
+        return false;
+    }
+    
+    // 获取文件大小
+    std::streamsize file_size = file.tellg();
+    file.seekg(0, std::ios::beg);
+    
+    std::cout << "[发送文件] " << filepath << " (" << file_size << " 字节)" << std::endl;
+    
+    // 发送8字节文件大小头（网络字节序）
+    uint64_t size_net = htonl(file_size);  // 注意：Linux需要自定义或用be64toh
+    // 简化：用4字节，限制4GB文件
+    uint32_t size_32 = static_cast<uint32_t>(file_size);
+    uint32_t size_net_32 = htonl(size_32);
+    if (!sendAll(reinterpret_cast<uint8_t*>(&size_net_32), sizeof(size_net_32))) return false;
+    
+    // 发送文件内容
+    uint8_t buffer[4096];
+    std::streamsize total_sent = 0;
+    
+    while (file.good()) {
+        file.read(reinterpret_cast<char*>(buffer), sizeof(buffer));
+        std::streamsize n = file.gcount();
+        if (n > 0) {
+            if (!sendAll(buffer, n)) return false;
+            total_sent += n;
+        }
+    }
+    
+    std::cout << "[发送完成] " << total_sent << " 字节" << std::endl;
+    return true;
+}
+
+bool TcpClient::receiveFile(const std::string& filepath, size_t expected_size) {
+    if (sockfd_ < 0) return false;
+    
+    // 接收4字节文件大小头
+    uint32_t size_net;
+    if (!recvAll(reinterpret_cast<uint8_t*>(&size_net), sizeof(size_net))) return false;
+    uint32_t file_size = ntohl(size_net);
+    
+    std::cout << "[接收文件] 预期 " << file_size << " 字节，保存到 " << filepath << std::endl;
+    
+    // 创建文件
+    std::ofstream file(filepath, std::ios::binary);
+    if (!file.is_open()) {
+        std::cerr << "无法创建文件: " << filepath << std::endl;
+        return false;
+    }
+    
+    // 接收文件内容
+    uint8_t buffer[4096];
+    uint32_t total_received = 0;
+    
+    while (total_received < file_size) {
+        uint32_t to_read = std::min(static_cast<uint32_t>(sizeof(buffer)), file_size - total_received);
+        
+        ssize_t n = recv(sockfd_, buffer, to_read, 0);
+        if (n <= 0) {
+            std::cerr << "接收中断: " << n << std::endl;
+            return false;
+        }
+        
+        file.write(reinterpret_cast<char*>(buffer), n);
+        total_received += n;
+    }
+    
+    std::cout << "[接收完成] " << total_received << " 字节" << std::endl;
+    return true;
+}
+
+// ========== 底层辅助函数 ==========
+
+bool TcpClient::sendAll(const uint8_t* data, size_t len) {
+    size_t total = 0;
+    while (total < len) {
+        ssize_t n = send(sockfd_, data + total, len - total, 0);
+        if (n < 0) {
+            perror("send failed");
+            return false;
+        }
+        total += n;
+    }
+    return true;
+}
+
+bool TcpClient::recvAll(uint8_t* data, size_t len) {
+    size_t total = 0;
+    while (total < len) {
+        ssize_t n = recv(sockfd_, data + total, len - total, 0);
+        if (n <= 0) {
+            if (n < 0) perror("recv failed");
+            return false;
+        }
+        total += n;
+    }
+    return true;
 }
